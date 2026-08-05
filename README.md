@@ -5,7 +5,8 @@ There are primarily 2 parts to HFT
 This repo primarily deals with point 1], however in future any pet projects related to hardware being made, their documentation can be added here
 PLEASE NOTE: It is impossible for a student led club to achieve true HFT latencies, as HFT firms have direct market access, broker liscences, clearing and settlement 
 support, and most importantly "COLOCATION", which allows these firms to place their servers directly within the exchange.
-True HFT firms (Unlike some firms that "Larp" that they do HFT) have "End to End" latencies of 
+True HFT firms (Unlike some firms that "Larp" that they do HFT) have "End to End" latencies of less than 100 nanoseconds, and we dont know they may be going 
+lower than that as JaneStreet never tells all of it publicly, but they optimize to the lowest level of CPU clock cycles
 But here what we can realistically achieve either using hardware and software:
 Level 1 — Typical College Algo Club (What most clubs build)
 
