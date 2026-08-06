@@ -71,16 +71,16 @@ Every optimization must be backed by benchmarks.
 
 ## Phase 2 — Networking
 
-- [ ] TCP Socket
-- [ ] TLS
-- [ ] WebSocket Client
+- [x] TCP Socket
+- [x] TLS
+- [x] WebSocket Client
 - [ ] Exchange Connectivity
 
 ---
 
 ## Phase 3 — Market Data
 
-- [ ] Live Market Data
+- [x] Live Market Data
 - [ ] Binary / JSON Parser
 - [ ] Order Book
 - [ ] Local Market State
