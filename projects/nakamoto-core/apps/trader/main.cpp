@@ -2,6 +2,7 @@
 #include <iostream>
 #include <thread>
 
+#include "exchange/BinanceFuturesClient.hpp"
 #include "latency/Benchmark.hpp"
 #include "latency/HighResolutionTimer.hpp"
 
@@ -48,5 +49,21 @@ int main()
         })
         .print();
 
+    std::cout << "\nConnecting to Binance Futures Testnet...\n";
+
+    nkm::BinanceFuturesClient client;
+    if (!client.connect())
+    {
+        std::cerr << "Failed to connect to Binance Futures Testnet" << std::endl;
+        return 1;
+    }
+
+    if (!client.subscribeTrades("BTCUSDT"))
+    {
+        std::cerr << "Failed to subscribe to BTCUSDT trades" << std::endl;
+        return 1;
+    }
+
+    client.run();
     return 0;
 }
