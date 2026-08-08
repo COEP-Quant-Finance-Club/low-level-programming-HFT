@@ -1,4 +1,5 @@
 #include "exchange/BinanceFuturesClient.hpp"
+#include "market_data/MarketDataParser.hpp"
 
 #include <boost/asio/connect.hpp>
 #include <boost/asio/ip/tcp.hpp>
@@ -10,8 +11,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <iomanip>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -26,7 +29,7 @@ namespace nkm {
 
 namespace {
 
-constexpr char kBinanceTestnetHost[] = "fstream.binance.com";
+constexpr char kBinanceTestnetHost[] = "stream.binancefuture.com";
 constexpr char kBinanceTestnetPort[] = "443";
 constexpr char kBinanceWsPath[] = "/ws";
 
@@ -41,10 +44,10 @@ std::string normalizeSymbol(std::string_view symbol)
     return normalized;
 }
 
-std::string buildSubscribePayload(std::string_view symbol)
+std::string buildDepthSubscribePayload(std::string_view symbol)
 {
     const std::string normalized = normalizeSymbol(symbol);
-    return std::string{"{\"method\":\"SUBSCRIBE\",\"params\":[\""} + normalized + "@trade\"],\"id\":1}";
+    return std::string{"{\"method\":\"SUBSCRIBE\",\"params\":[\""} + normalized + "@depth\"],\"id\":1}";
 }
 
 class WebSocketSession
@@ -54,6 +57,7 @@ public:
         : resolver_(io_)
         , stream_(io_, ctx_)
     {
+        std::cout << "DEBUG: Creating io_context\n";
         ctx_.set_default_verify_paths();
         ctx_.set_verify_mode(ssl::verify_peer);
     }
@@ -69,16 +73,27 @@ public:
     bool connect()
     {
         try {
+            std::cout << "DEBUG: Resolving hostname\n";
             const auto results = resolver_.resolve(kBinanceTestnetHost, kBinanceTestnetPort);
+            std::cout << "DEBUG: Resolved hostname\n";
+
+            std::cout << "DEBUG: TCP connect\n";
             net::connect(stream_.next_layer().lowest_layer(), results.begin(), results.end());
+            std::cout << "DEBUG: TCP connect complete\n";
 
             if (!SSL_set_tlsext_host_name(stream_.next_layer().native_handle(), kBinanceTestnetHost))
             {
                 throw std::runtime_error("SSL_set_tlsext_host_name failed");
             }
 
+            std::cout << "DEBUG: SSL handshake\n";
             stream_.next_layer().handshake(ssl::stream_base::client);
+            std::cout << "DEBUG: SSL handshake complete\n";
+
+            std::cout << "DEBUG: WebSocket handshake\n";
             stream_.handshake(kBinanceTestnetHost, kBinanceWsPath);
+            std::cout << "DEBUG: WebSocket handshake complete\n";
+
             connected_ = true;
             return true;
         }
@@ -97,8 +112,10 @@ public:
         }
 
         try {
-            const std::string payload = buildSubscribePayload(symbol);
+            const std::string payload = buildDepthSubscribePayload(symbol);
             stream_.write(net::buffer(payload));
+            std::cout << "DEBUG: Sending subscription\n";
+            std::cout << "DEBUG: Subscription sent\n";
             return true;
         }
         catch (std::exception const& ex) {
@@ -107,7 +124,7 @@ public:
         }
     }
 
-    void run()
+    void run(const BinanceFuturesClient::DepthEventSink& sink)
     {
         if (!connected_)
         {
@@ -116,10 +133,26 @@ public:
 
         try {
             beast::flat_buffer buffer;
+            MarketDataParser parser;
+
             while (true)
             {
                 stream_.read(buffer);
-                std::cout << beast::buffers_to_string(buffer.data()) << std::endl;
+
+                const std::string payload = beast::buffers_to_string(buffer.data());
+                const std::string_view payloadView(payload);
+
+                const bool looksLikeAck = payloadView.find("\"result\":null") != std::string_view::npos || payloadView.find("\"id\":1") != std::string_view::npos;
+                if (looksLikeAck) {
+                    std::cout << "DEBUG: Subscription acknowledged\n";
+                }
+                else if (const auto parsed = parser.parseDepthEvent(payloadView); parsed.has_value()) {
+                    sink(*parsed);
+                }
+                else {
+                    std::cerr << "BinanceFuturesClient: malformed or non-depth WebSocket message ignored\n";
+                }
+
                 buffer.consume(buffer.size());
             }
         }
@@ -181,7 +214,7 @@ bool BinanceFuturesClient::connect()
     return impl_->session->connect();
 }
 
-bool BinanceFuturesClient::subscribeTrades(std::string_view symbol)
+bool BinanceFuturesClient::subscribeDepth(std::string_view symbol)
 {
     if (!impl_->session)
     {
@@ -191,14 +224,19 @@ bool BinanceFuturesClient::subscribeTrades(std::string_view symbol)
     return impl_->session->subscribe(symbol);
 }
 
-void BinanceFuturesClient::run()
+bool BinanceFuturesClient::subscribeTrades(std::string_view symbol)
+{
+    return subscribeDepth(symbol);
+}
+
+void BinanceFuturesClient::run(const DepthEventSink& sink)
 {
     if (!impl_->session)
     {
         return;
     }
 
-    impl_->session->run();
+    impl_->session->run(sink);
 }
 
 void BinanceFuturesClient::disconnect()

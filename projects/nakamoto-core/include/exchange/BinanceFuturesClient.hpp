@@ -1,5 +1,8 @@
 #pragma once
 
+#include "market_data/DepthEvent.hpp"
+
+#include <functional>
 #include <memory>
 #include <string_view>
 
@@ -8,6 +11,8 @@ namespace nkm {
 class BinanceFuturesClient
 {
 public:
+    using DepthEventSink = std::function<void(const DepthEvent&)>;
+
     BinanceFuturesClient();
     ~BinanceFuturesClient();
 
@@ -18,8 +23,9 @@ public:
     BinanceFuturesClient& operator=(BinanceFuturesClient&&) noexcept;
 
     [[nodiscard]] bool connect();
+    [[nodiscard]] bool subscribeDepth(std::string_view symbol);
     [[nodiscard]] bool subscribeTrades(std::string_view symbol);
-    void run();
+    void run(const DepthEventSink& sink);
     void disconnect();
 
 private:
