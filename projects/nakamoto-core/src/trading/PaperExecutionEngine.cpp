@@ -8,114 +8,145 @@ constexpr double kTolerance = 1e-9;
 
 } // namespace
 
-PaperExecutionEngine::PaperExecutionEngine(double startingCash,
-                                           double feeRate,
-                                           double maxPositionSize,
-                                           double tradeQuantity)
-    : startingCash_(startingCash)
-    , cash_(startingCash)
-    , feeRate_(feeRate)
-    , maxPositionSize_(maxPositionSize)
-    , tradeQuantity_(tradeQuantity)
+PaperExecutionEngine::PaperExecutionEngine()
+    : PaperExecutionEngine(Config{})
+{
+}
+
+PaperExecutionEngine::PaperExecutionEngine(Config config)
+    : account_(FuturesAccount::Config{config.startingCapital,
+                                      config.leverage,
+                                      config.makerFeeRate,
+                                      config.takerFeeRate,
+                                      config.fundingRate,
+                                      config.fundingInterval})
+    , maxPositionSize_(config.maxPositionSize)
+    , tradeQuantity_(config.tradeQuantity)
 {
 }
 
 std::optional<PaperTrade> PaperExecutionEngine::tryBuy(double price, double imbalance)
 {
-    // Risk limits: refuse trades that would exceed the maximum position size,
-    // and refuse to buy beyond available cash (no leverage logic yet).
-    if (position_ + tradeQuantity_ > maxPositionSize_ + kTolerance) {
+    if (price <= 0.0) {
         return std::nullopt;
     }
 
-    const double notional = tradeQuantity_ * price;
-    const double fee = notional * feeRate_;
-    if (cash_ < notional + fee) {
+    // Risk limit: never exceed the configured maximum absolute position.
+    if (position() + tradeQuantity_ > maxPositionSize_ + kTolerance) {
         return std::nullopt;
     }
 
-    // Average-cost entry update.
-    averageEntryPrice_ =
-        (averageEntryPrice_ * position_ + notional) / (position_ + tradeQuantity_);
+    // The account refuses the order when required margin + fee would exceed
+    // the available balance (simplified margin model).
+    const auto fill = account_.openLong(tradeQuantity_, price);
+    if (!fill) {
+        return std::nullopt;
+    }
 
-    position_ += tradeQuantity_;
-    cash_ -= notional + fee;
-    feesPaid_ += fee;
     ++tradeCount_;
-
     return PaperTrade{Signal::Buy,
-                      price,
-                      tradeQuantity_,
-                      fee,
+                      fill->price,
+                      fill->quantity,
+                      fill->fee,
                       imbalance,
-                      cash_,
-                      position_};
+                      fill->walletAfter,
+                      fill->availableAfter,
+                      fill->positionAfter,
+                      fill->marginAfter};
 }
 
 std::optional<PaperTrade> PaperExecutionEngine::trySell(double price, double imbalance)
 {
-    // No short selling in this baseline: cannot sell more than the position.
-    if (tradeQuantity_ > position_ + kTolerance) {
+    if (price <= 0.0) {
         return std::nullopt;
     }
 
-    const double notional = tradeQuantity_ * price;
-    const double fee = notional * feeRate_;
-
-    realizedPnl_ += (price - averageEntryPrice_) * tradeQuantity_;
-
-    position_ -= tradeQuantity_;
-    cash_ += notional - fee;
-    feesPaid_ += fee;
-    ++tradeCount_;
-
-    if (position_ <= kTolerance) {
-        position_ = 0.0;
-        averageEntryPrice_ = 0.0;
+    // The current strategy is long-only: a SELL only closes an existing long.
+    // SELL-to-open (shorts) is left for a future sprint.
+    if (tradeQuantity_ > position() + kTolerance) {
+        return std::nullopt;
     }
 
+    const auto fill = account_.closeLong(tradeQuantity_, price);
+    if (!fill) {
+        return std::nullopt;
+    }
+
+    ++tradeCount_;
     return PaperTrade{Signal::Sell,
-                      price,
-                      tradeQuantity_,
-                      fee,
+                      fill->price,
+                      fill->quantity,
+                      fill->fee,
                       imbalance,
-                      cash_,
-                      position_};
+                      fill->walletAfter,
+                      fill->availableAfter,
+                      fill->positionAfter,
+                      fill->marginAfter};
 }
 
-double PaperExecutionEngine::cash() const
+double PaperExecutionEngine::walletBalance() const
 {
-    return cash_;
+    return account_.walletBalance();
+}
+
+double PaperExecutionEngine::availableBalance() const
+{
+    return account_.availableBalance();
+}
+
+double PaperExecutionEngine::equity(double markPrice) const
+{
+    return account_.equity(markPrice);
 }
 
 double PaperExecutionEngine::position() const
 {
-    return position_;
+    return account_.position();
 }
 
 double PaperExecutionEngine::averageEntryPrice() const
 {
-    return averageEntryPrice_;
+    return account_.averageEntryPrice();
 }
 
-double PaperExecutionEngine::realizedPnl() const
+double PaperExecutionEngine::positionNotional() const
 {
-    return realizedPnl_;
+    return account_.positionNotional();
+}
+
+double PaperExecutionEngine::initialMargin() const
+{
+    return account_.initialMargin();
 }
 
 double PaperExecutionEngine::unrealizedPnl(double markPrice) const
 {
-    return (markPrice - averageEntryPrice_) * position_;
+    return account_.unrealizedPnl(markPrice);
 }
 
-double PaperExecutionEngine::totalPnl(double markPrice) const
+double PaperExecutionEngine::realizedPnl() const
 {
-    return realizedPnl_ + unrealizedPnl(markPrice) - feesPaid_;
+    return account_.realizedPnl();
 }
 
-double PaperExecutionEngine::feesPaid() const
+double PaperExecutionEngine::tradingFees() const
 {
-    return feesPaid_;
+    return account_.tradingFees();
+}
+
+double PaperExecutionEngine::fundingPayments() const
+{
+    return account_.fundingPayments();
+}
+
+double PaperExecutionEngine::netPnl(double markPrice) const
+{
+    return account_.netPnl(markPrice);
+}
+
+double PaperExecutionEngine::startingCapital() const
+{
+    return account_.startingCapital();
 }
 
 std::size_t PaperExecutionEngine::tradeCount() const
@@ -123,14 +154,39 @@ std::size_t PaperExecutionEngine::tradeCount() const
     return tradeCount_;
 }
 
-double PaperExecutionEngine::startingCash() const
+void PaperExecutionEngine::setFundingRate(double rate)
 {
-    return startingCash_;
+    account_.setFundingRate(rate);
 }
 
-double PaperExecutionEngine::feeRate() const
+double PaperExecutionEngine::applyFunding(double markPrice)
 {
-    return feeRate_;
+    return account_.applyFunding(markPrice);
+}
+
+double PaperExecutionEngine::applyFunding(double markPrice, double rate)
+{
+    return account_.applyFunding(markPrice, rate);
+}
+
+double PaperExecutionEngine::leverage() const
+{
+    return account_.leverage();
+}
+
+double PaperExecutionEngine::makerFeeRate() const
+{
+    return account_.makerFeeRate();
+}
+
+double PaperExecutionEngine::takerFeeRate() const
+{
+    return account_.takerFeeRate();
+}
+
+double PaperExecutionEngine::fundingRate() const
+{
+    return account_.fundingRate();
 }
 
 double PaperExecutionEngine::maxPositionSize() const
@@ -141,11 +197,6 @@ double PaperExecutionEngine::maxPositionSize() const
 double PaperExecutionEngine::tradeQuantity() const
 {
     return tradeQuantity_;
-}
-
-double PaperExecutionEngine::equity(double markPrice) const
-{
-    return cash_ + position_ * markPrice;
 }
 
 } // namespace nkm

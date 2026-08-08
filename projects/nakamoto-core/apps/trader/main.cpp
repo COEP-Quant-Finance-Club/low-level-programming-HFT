@@ -20,11 +20,20 @@ namespace {
 constexpr std::string_view kSymbol = "BTCUSDT";
 
 // --- Paper trading configuration (all assumptions, clearly labeled) ---
-// Starting paper capital in USDT.
-constexpr double kStartingCash = 10'000.0;
-// Flat proportional fee on notional per side. Conservative placeholder only -
-// NOT a real Binance fee tier; configurable assumption.
-constexpr double kFeeRate = 0.0002; // 0.02%
+// Starting paper capital in USDT (collateral for the futures account).
+constexpr double kStartingCapital = 10'000.0;
+// Simplified paper margin model: initial margin = position notional / leverage.
+constexpr double kLeverage = 1.0;
+// Fee placeholders - NOT verified Binance fee tiers; to be researched before
+// real capital. Current execution is taker (BUY at ask, SELL at bid), so the
+// taker rate is charged on fills; the maker rate is stored for a future
+// limit-order path.
+constexpr double kMakerFeeRate = 0.0002; // 0.02% placeholder
+constexpr double kTakerFeeRate = 0.0004; // 0.04% placeholder
+// Simplified funding placeholder: per-interval rate; applied manually only,
+// never fetched from a live funding API yet.
+constexpr double kFundingRate = 0.0001; // 0.01% placeholder
+constexpr std::chrono::hours kFundingInterval{8};
 // Maximum absolute position in base units (BTC). Trades exceeding it are refused.
 constexpr double kMaxPositionSize = 1.0;
 // Fixed base quantity per paper trade.
@@ -59,30 +68,50 @@ void printPaperStatus(const nkm::OrderBookSynchronizer& synchronizer,
     const nkm::Signal signal = strategy.evaluate(imbalance);
     const double markPrice = book.midPrice();
 
+    const double pos = engine.position();
+    std::string_view side = "FLAT";
+    if (pos > 1e-9) {
+        side = "LONG";
+    } else if (pos < -1e-9) {
+        side = "SHORT";
+    }
+
     std::cout << "========================================\n";
-    std::cout << "Nakamoto Core - Paper Trader\n";
+    std::cout << "Nakamoto Core - Paper Futures Account\n";
     std::cout << "========================================\n\n";
-    std::cout << "Symbol: " << kSymbol << "\n\n";
+    std::cout << "Symbol: BTCUSDT Perpetual\n\n";
 
-    std::cout << "Book:\n";
     std::cout << std::fixed << std::setprecision(2);
-    std::cout << "  Best Bid: " << book.bestBid() << "\n";
-    std::cout << "  Best Ask: " << book.bestAsk() << "\n";
-    std::cout << "  Spread  : " << book.spread() << "\n\n";
+    std::cout << "Wallet Balance : " << engine.walletBalance() << " USDT\n";
+    std::cout << "Available      : " << engine.availableBalance() << " USDT\n";
+    std::cout << "Equity         : " << engine.equity(markPrice) << " USDT\n\n";
 
-    std::cout << "Signal:\n";
-    std::cout << std::showpos << std::setprecision(2) << "  Imbalance: " << imbalance << "\n";
-    std::cout << std::noshowpos << "  Signal   : " << signalName(signal) << "\n\n";
+    std::cout << "Position       : " << std::showpos << std::setprecision(4) << pos << " BTC\n";
+    std::cout << "Position Side  : " << side << '\n';
+    std::cout << std::noshowpos << std::setprecision(2) << "\n";
 
-    std::cout << "Paper Account:\n";
-    std::cout << "  Cash           : " << engine.cash() << "\n";
-    std::cout << "  Position       : " << engine.position() << "\n";
-    std::cout << "  Avg Entry      : " << engine.averageEntryPrice() << "\n";
-    std::cout << "  Unrealized P&L : " << engine.unrealizedPnl(markPrice) << "\n";
-    std::cout << "  Realized P&L   : " << engine.realizedPnl() << "\n";
-    std::cout << "  Fees Paid      : " << engine.feesPaid() << "\n";
-    std::cout << "  Trades         : " << engine.tradeCount() << "\n";
-    std::cout << "  Equity (m2m)   : " << engine.equity(markPrice) << "\n\n";
+    std::cout << "Mark Price     : " << markPrice << '\n';
+    std::cout << "Entry Price    : " << engine.averageEntryPrice() << "\n\n";
+
+    std::cout << "Position Notional : " << engine.positionNotional() << " USDT\n";
+    std::cout << "Initial Margin    : " << engine.initialMargin() << " USDT\n";
+    std::cout << "Leverage          : " << engine.leverage() << "x\n\n";
+
+    std::cout << "Unrealized P&L : " << engine.unrealizedPnl(markPrice) << " USDT\n";
+    std::cout << "Realized P&L   : " << engine.realizedPnl() << " USDT\n\n";
+
+    std::cout << "Trading Fees  : " << engine.tradingFees() << " USDT\n";
+    std::cout << "Funding       : " << engine.fundingPayments() << " USDT\n";
+    std::cout << "Net P&L       : " << engine.netPnl(markPrice) << " USDT\n\n";
+
+    std::cout << "Trades        : " << engine.tradeCount() << "\n\n";
+
+    std::cout << "--- Market / Signal ---\n";
+    std::cout << "Best Bid  : " << book.bestBid() << '\n';
+    std::cout << "Best Ask  : " << book.bestAsk() << '\n';
+    std::cout << "Spread    : " << book.spread() << '\n';
+    std::cout << "Imbalance : " << std::showpos << imbalance << '\n';
+    std::cout << std::noshowpos << "Signal    : " << signalName(signal) << '\n';
     std::cout << "========================================\n";
     std::cout << std::flush;
 }
@@ -92,10 +121,12 @@ void printPaperTrade(const nkm::PaperTrade& trade)
     std::cout << "[PAPER TRADE]\n";
     std::cout << signalName(trade.side) << "\n";
     std::cout << std::fixed << std::setprecision(2);
-    std::cout << "Price    : " << trade.price << "\n";
-    std::cout << "Quantity : " << trade.quantity << "\n";
-    std::cout << "Imbalance: " << trade.imbalance << "\n";
-    std::cout << "Fee      : " << trade.fee << "\n";
+    std::cout << "Price        : " << trade.price << "\n";
+    std::cout << "Quantity     : " << trade.quantity << "\n";
+    std::cout << "Imbalance    : " << trade.imbalance << "\n";
+    std::cout << "Fee (taker)  : " << trade.fee << "\n";
+    std::cout << "Available    : " << trade.availableAfter << " USDT\n";
+    std::cout << "Margin       : " << trade.marginAfter << " USDT\n";
     std::cout << std::flush;
 }
 
@@ -167,7 +198,16 @@ int main()
     //              -> PaperExecutionEngine -> P&L
     nkm::OrderBookImbalance imbalanceSignal(kImbalanceLevels);
     nkm::ThresholdStrategy strategy(kImbalanceThreshold);
-    nkm::PaperExecutionEngine engine(kStartingCash, kFeeRate, kMaxPositionSize, kTradeQuantity);
+    nkm::PaperExecutionEngine engine(nkm::PaperExecutionEngine::Config{
+        .startingCapital = kStartingCapital,
+        .leverage = kLeverage,
+        .makerFeeRate = kMakerFeeRate,
+        .takerFeeRate = kTakerFeeRate,
+        .fundingRate = kFundingRate,
+        .fundingInterval = kFundingInterval,
+        .maxPositionSize = kMaxPositionSize,
+        .tradeQuantity = kTradeQuantity,
+    });
 
     // ------------------------------------------------------------------
     // The WebSocket receive loop runs on a background thread and feeds

@@ -94,6 +94,7 @@ target_link_libraries(NakamotoOrderBook
 add_library(NakamotoTrading
     src/trading/OrderBookImbalance.cpp
     src/trading/Strategy.cpp
+    src/trading/FuturesAccount.cpp
     src/trading/PaperExecutionEngine.cpp
 )
 
